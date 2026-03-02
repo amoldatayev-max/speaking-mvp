@@ -80,7 +80,7 @@ body{
 <body>
 <div class="container">
   <div class="phrase-wrap">
-    <div id="phrase" class="phrase empty">HOLD TO SPEAK</div>
+    <div id="phrase" class="phrase empty">TAP TO SPEAK</div>
   </div>
 
   <button id="btn" class="btn">SPEAK</button>
@@ -88,11 +88,18 @@ body{
 </div>
 
 <script>
+const phraseEl = document.getElementById("phrase");
+const btn = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+
 const SpeechRecognition =
   window.SpeechRecognition || window.webkitSpeechRecognition;
 
 if (!SpeechRecognition) {
-  alert("Speech recognition not supported in this browser");
+  phraseEl.textContent = "Speech not supported";
+  btn.disabled = true;
+  statusEl.textContent = "UNSUPPORTED";
+  throw new Error("SpeechRecognition not supported");
 }
 
 const recognition = new SpeechRecognition();
@@ -100,76 +107,83 @@ recognition.lang = "en-US";
 recognition.interimResults = true;
 recognition.continuous = false;
 
-const phraseEl = document.getElementById("phrase");
-const btn = document.getElementById("btn");
-const statusEl = document.getElementById("status");
-
 let finalTranscript = "";
 let listening = false;
 
-// 🎤 LIVE TRANSCRIPTION
+/* 🎤 LIVE TRANSCRIPTION */
 recognition.onresult = (e) => {
   let interim = "";
 
   for (let i = e.resultIndex; i < e.results.length; i++) {
     const text = e.results[i][0].transcript;
-    if (e.results[i].isFinal) finalTranscript += text;
-    else interim += text;
+    if (e.results[i].isFinal) {
+      finalTranscript += text;
+    } else {
+      interim += text;
+    }
   }
 
   phraseEl.className = "phrase";
   phraseEl.textContent = finalTranscript + interim;
 };
 
-// 🧠 AFTER SPEECH → AI
-recognition.onend = () => {
-  if (!listening) return;
+/* 🧠 AFTER SPEECH */
+recognition.onend = async () => {
+  if (!finalTranscript.trim()) {
+    listening = false;
+    statusEl.textContent = "IDLE";
+    return;
+  }
 
-  listening = false;
   statusEl.textContent = "PROCESSING";
 
-  fetch("/api/ai", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: finalTranscript })
-  })
-  .then(res => res.json())
-  .then(data => {
+  try {
+    const response = await fetch("/api/ai", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ text: finalTranscript })
+    });
+
+    if (!response.ok) {
+      throw new Error("Server error");
+    }
+
+    const data = await response.json();
+
     phraseEl.className = "phrase";
-    phraseEl.textContent = data.reply;
-  })
-  .catch(() => {
+    phraseEl.textContent = data.reply || "No response";
+
+  } catch (err) {
+    console.error(err);
     phraseEl.className = "phrase empty";
     phraseEl.textContent = "ERROR";
-  })
-  .finally(() => {
+  } finally {
     finalTranscript = "";
+    listening = false;
     statusEl.textContent = "IDLE";
-  });
+  }
 };
 
-// ▶️ START
-function start() {
-  if (listening) return;
-  listening = true;
-  finalTranscript = "";
-  phraseEl.textContent = "";
-  phraseEl.className = "phrase";
-  statusEl.textContent = "LISTENING";
-  recognition.start();
-}
+/* 🔘 TAP TO TOGGLE */
+btn.addEventListener("click", () => {
+  if (!listening) {
+    listening = true;
+    finalTranscript = "";
+    phraseEl.textContent = "";
+    phraseEl.className = "phrase";
+    statusEl.textContent = "LISTENING";
 
-// ⏹ STOP
-function stop() {
-  if (!listening) return;
-  recognition.stop();
-}
-
-// BUTTON
-btn.addEventListener("mousedown", start);
-btn.addEventListener("mouseup", stop);
-btn.addEventListener("touchstart", e => { e.preventDefault(); start(); });
-btn.addEventListener("touchend", e => { e.preventDefault(); stop(); });
+    try {
+      recognition.start();
+    } catch (err) {
+      console.error(err);
+    }
+  } else {
+    recognition.stop();
+  }
+});
 </script>
 </body>
 </html>
