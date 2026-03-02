@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Speaking MVP</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+
+<style>
+:root{
+  --bg:#1A0A10;
+  --btn:#6B1328;
+  --accent:#E8415E;
+  --text:#F5E6EA;
+  --muted:rgba(245,230,234,0.45);
+}
+
+*{margin:0;padding:0;box-sizing:border-box;}
+
+body{
+  background:var(--bg);
+  color:var(--text);
+  font-family:'DM Mono',monospace;
+  min-height:100vh;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.container{
+  width:90%;
+  max-width:600px;
+  text-align:center;
+}
+
+.phrase-wrap{
+  min-height:120px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  margin-bottom:48px;
+}
+
+.phrase{
+  font-family:'DM Serif Display',serif;
+  font-size:clamp(28px,6vw,46px);
+  font-style:italic;
+}
+
+.phrase.empty{
+  font-family:'DM Mono',monospace;
+  font-size:13px;
+  letter-spacing:.18em;
+  color:var(--muted);
+}
+
+.btn{
+  width:200px;
+  height:200px;
+  border-radius:50%;
+  border:none;
+  background:var(--btn);
+  color:var(--text);
+  font-size:12px;
+  letter-spacing:.22em;
+  cursor:pointer;
+}
+
+.status{
+  margin-top:32px;
+  font-size:10px;
+  letter-spacing:.22em;
+  color:var(--muted);
+}
+</style>
+</head>
+
+<body>
+<div class="container">
+  <div class="phrase-wrap">
+    <div id="phrase" class="phrase empty">HOLD TO SPEAK</div>
+  </div>
+
+  <button id="btn" class="btn">SPEAK</button>
+  <div id="status" class="status">IDLE</div>
+</div>
+
+<script>
+const SpeechRecognition =
+  window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (!SpeechRecognition) {
+  alert("Speech recognition not supported in this browser");
+}
+
+const recognition = new SpeechRecognition();
+recognition.lang = "en-US";
+recognition.interimResults = true;
+recognition.continuous = false;
+
+const phraseEl = document.getElementById("phrase");
+const btn = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+
+let finalTranscript = "";
+let listening = false;
+
+// 🎤 LIVE TRANSCRIPTION
+recognition.onresult = (e) => {
+  let interim = "";
+
+  for (let i = e.resultIndex; i < e.results.length; i++) {
+    const text = e.results[i][0].transcript;
+    if (e.results[i].isFinal) finalTranscript += text;
+    else interim += text;
+  }
+
+  phraseEl.className = "phrase";
+  phraseEl.textContent = finalTranscript + interim;
+};
+
+// 🧠 AFTER SPEECH → AI
+recognition.onend = () => {
+  if (!listening) return;
+
+  listening = false;
+  statusEl.textContent = "PROCESSING";
+
+  fetch("/api/ai", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: finalTranscript })
+  })
+  .then(res => res.json())
+  .then(data => {
+    phraseEl.className = "phrase";
+    phraseEl.textContent = data.reply;
+  })
+  .catch(() => {
+    phraseEl.className = "phrase empty";
+    phraseEl.textContent = "ERROR";
+  })
+  .finally(() => {
+    finalTranscript = "";
+    statusEl.textContent = "IDLE";
+  });
+};
+
+// ▶️ START
+function start() {
+  if (listening) return;
+  listening = true;
+  finalTranscript = "";
+  phraseEl.textContent = "";
+  phraseEl.className = "phrase";
+  statusEl.textContent = "LISTENING";
+  recognition.start();
+}
+
+// ⏹ STOP
+function stop() {
+  if (!listening) return;
+  recognition.stop();
+}
+
+// BUTTON
+btn.addEventListener("mousedown", start);
+btn.addEventListener("mouseup", stop);
+btn.addEventListener("touchstart", e => { e.preventDefault(); start(); });
+btn.addEventListener("touchend", e => { e.preventDefault(); stop(); });
+</script>
+</body>
+</html>
