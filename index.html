@@ -61,17 +61,29 @@ body{
   width:200px;
   height:200px;
   border-radius:50%;
-  border:none;
+  border:2px solid transparent;
   background:var(--btn);
   color:var(--text);
   font-size:12px;
   letter-spacing:.22em;
   cursor:pointer;
-  transition: background 0.2s ease;
+  transition: background 0.2s ease, transform 0.1s ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .btn.active{
-  background: var(--accent);
+  background:var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.btn:focus-visible{
+  outline: 2px solid var(--accent);
+  outline-offset: 6px;
+}
+
+@keyframes pulse {
+  0%,100%{ transform:scale(1); }
+  50%{ transform:scale(1.05); }
 }
 
 .status{
@@ -85,38 +97,71 @@ body{
 
 <body>
 <div class="container">
-  <div class="phrase-wrap">
+
+  <div
+    class="phrase-wrap"
+    role="status"
+    aria-live="polite"
+    aria-atomic="true"
+  >
     <div id="phrase" class="phrase empty">TAP TO SPEAK</div>
   </div>
 
-  <button id="btn" class="btn">SPEAK</button>
-  <div id="status" class="status">IDLE</div>
+  <button
+    id="btn"
+    class="btn"
+    aria-label="Tap to start speaking"
+  >SPEAK</button>
+
+  <div
+    id="status"
+    class="status"
+    aria-live="assertive"
+    aria-atomic="true"
+  >IDLE</div>
+
 </div>
 
 <script>
-const phraseEl = document.getElementById("phrase");
-const btn = document.getElementById("btn");
-const statusEl = document.getElementById("status");
+/* ─── SPEECH SYNTHESIS ─────────────────────────────────────── */
 
-const SpeechRecognition =
-  window.SpeechRecognition || window.webkitSpeechRecognition;
+let preferredVoice = null;
 
-if (!SpeechRecognition) {
-  phraseEl.textContent = "Speech not supported";
-  btn.disabled = true;
-  statusEl.textContent = "UNSUPPORTED";
-  throw new Error("SpeechRecognition not supported");
+function loadVoices() {
+  const voices = speechSynthesis.getVoices();
+  preferredVoice =
+    voices.find(v => v.lang === "en-US" && v.localService) ||
+    voices.find(v => v.lang.startsWith("en") && v.localService) ||
+    voices.find(v => v.lang === "en-US") ||
+    voices.find(v => v.lang.startsWith("en")) ||
+    null;
 }
 
-const recognition = new SpeechRecognition();
-recognition.lang = "en-US";
-recognition.interimResults = true;
-recognition.continuous = false;
+loadVoices();
+if (speechSynthesis.onvoiceschanged !== undefined) {
+  speechSynthesis.onvoiceschanged = loadVoices;
+}
 
-let finalTranscript = "";
-let listening = false;
+function speak(text) {
+  return new Promise((resolve) => {
+    speechSynthesis.cancel();
 
-/* 🎬 KARAOKE */
+    // Safari needs a tiny delay after cancel
+    setTimeout(() => {
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang  = "en-US";
+      utter.rate  = 0.92;
+      utter.pitch = 1;
+      if (preferredVoice) utter.voice = preferredVoice;
+      utter.onend = () => resolve();
+      utter.onerror = () => resolve();
+      speechSynthesis.speak(utter);
+    }, 120);
+  });
+}
+
+/* ─── KARAOKE DISPLAY ──────────────────────────────────────── */
+
 function showKaraoke(text) {
   const lines = text.split("\n").filter(l => l.trim());
   phraseEl.innerHTML = "";
@@ -125,46 +170,74 @@ function showKaraoke(text) {
   lines.forEach((line, i) => {
     const span = document.createElement("span");
     span.textContent = line;
-    span.style.cssText = `
-      display: block;
-      opacity: 0;
-      transition: opacity 0.4s ease;
-    `;
+    span.style.cssText = "display:block;opacity:0;transition:opacity 0.4s ease;";
     phraseEl.appendChild(span);
-
-    setTimeout(() => {
-      span.style.opacity = "1";
-    }, i * 600);
+    setTimeout(() => { span.style.opacity = "1"; }, i * 600);
   });
 }
 
-/* 🎤 LIVE TRANSCRIPTION */
+/* ─── SPEECH RECOGNITION ───────────────────────────────────── */
+
+const phraseEl  = document.getElementById("phrase");
+const btn       = document.getElementById("btn");
+const statusEl  = document.getElementById("status");
+
+const SpeechRecognition =
+  window.SpeechRecognition || window.webkitSpeechRecognition;
+
+if (!SpeechRecognition) {
+  phraseEl.textContent = "Speech not supported";
+  statusEl.textContent = "UNSUPPORTED";
+  btn.disabled = true;
+  speak("Sorry, speech recognition is not supported in this browser.");
+  throw new Error("SpeechRecognition not supported");
+}
+
+const recognition       = new SpeechRecognition();
+recognition.lang        = "en-US";
+recognition.interimResults = true;
+recognition.continuous  = false;
+
+let finalTranscript = "";
+let listening       = false;
+let endFired        = false; // Safari onend double-fire guard
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+function setListening(active) {
+  listening = active;
+  btn.classList.toggle("active", active);
+  btn.setAttribute("aria-label", active ? "Tap to stop" : "Tap to start speaking");
+}
+
+/* Live transcription */
 recognition.onresult = (e) => {
   let interim = "";
-
   for (let i = e.resultIndex; i < e.results.length; i++) {
-    const text = e.results[i][0].transcript;
-    if (e.results[i].isFinal) {
-      finalTranscript += text;
-    } else {
-      interim += text;
-    }
+    const t = e.results[i][0].transcript;
+    if (e.results[i].isFinal) finalTranscript += t;
+    else interim += t;
   }
-
   phraseEl.className = "phrase";
   phraseEl.textContent = finalTranscript + interim;
 };
 
-/* 🧠 AFTER SPEECH */
+/* After speech ends */
 recognition.onend = async () => {
+  if (endFired) return;   // Safari double-fire guard
+  endFired = true;
+
   if (!finalTranscript.trim()) {
-    listening = false;
-    btn.classList.remove("active");
-    statusEl.textContent = "IDLE";
+    setListening(false);
+    setStatus("IDLE");
     return;
   }
 
-  statusEl.textContent = "PROCESSING";
+  setListening(false);
+  setStatus("PROCESSING");
+  await speak("Processing your answer.");
 
   try {
     const response = await fetch("/api/ai", {
@@ -175,40 +248,50 @@ recognition.onend = async () => {
 
     if (!response.ok) throw new Error("Server error");
 
-    const data = await response.json();
-    showKaraoke(data.reply || "Okay. Say it again.");
+    const data  = await response.json();
+    const reply = data.reply || "Okay. Say it again.";
+
+    showKaraoke(reply);
+    await speak(reply);
 
   } catch (err) {
     console.error(err);
-    phraseEl.className = "phrase empty";
-    phraseEl.textContent = "ERROR";
+    phraseEl.className    = "phrase empty";
+    phraseEl.textContent  = "TRY AGAIN";
+    await speak("Something went wrong. Please try again.");
   } finally {
     finalTranscript = "";
-    listening = false;
-    btn.classList.remove("active");
-    statusEl.textContent = "IDLE";
+    setStatus("IDLE");
   }
 };
 
-/* 🔴 ERROR HANDLING */
-recognition.onerror = (e) => {
+recognition.onerror = async (e) => {
   console.error("Recognition error:", e.error);
-  phraseEl.className = "phrase empty";
-  phraseEl.textContent = "TRY AGAIN";
-  listening = false;
-  btn.classList.remove("active");
-  statusEl.textContent = "IDLE";
+  setListening(false);
+  setStatus("IDLE");
+
+  if (e.error === "not-allowed") {
+    phraseEl.textContent = "MICROPHONE BLOCKED";
+    await speak("Microphone access was denied. Please allow microphone and try again.");
+  } else {
+    phraseEl.className   = "phrase empty";
+    phraseEl.textContent = "TRY AGAIN";
+    await speak("Something went wrong. Please try again.");
+  }
+  finalTranscript = "";
 };
 
-/* 🔘 TAP TO TOGGLE */
-btn.addEventListener("click", () => {
+/* ─── BUTTON ───────────────────────────────────────────────── */
+
+btn.addEventListener("click", async () => {
   if (!listening) {
-    listening = true;
+    endFired        = false;
     finalTranscript = "";
     phraseEl.textContent = "";
-    phraseEl.className = "phrase";
-    btn.classList.add("active");
-    statusEl.textContent = "LISTENING";
+    phraseEl.className   = "phrase";
+    setListening(true);
+    setStatus("LISTENING");
+    await speak("Listening.");
 
     try {
       recognition.start();
@@ -218,6 +301,15 @@ btn.addEventListener("click", () => {
   } else {
     recognition.stop();
   }
+});
+
+/* ─── PAGE LOAD ────────────────────────────────────────────── */
+
+window.addEventListener("load", () => {
+  // Delay slightly — Safari blocks synthesis before user gesture
+  setTimeout(() => {
+    speak("Hello. Tap the button and start speaking.");
+  }, 800);
 });
 </script>
 </body>
