@@ -67,21 +67,21 @@ body{
   font-size:12px;
   letter-spacing:.22em;
   cursor:pointer;
-  transition: background 0.2s ease, transform 0.1s ease;
-  -webkit-tap-highlight-color: transparent;
+  transition:background 0.2s ease, transform 0.1s ease;
+  -webkit-tap-highlight-color:transparent;
 }
 
 .btn.active{
   background:var(--accent);
-  animation: pulse 1.4s ease-in-out infinite;
+  animation:pulse 1.4s ease-in-out infinite;
 }
 
 .btn:focus-visible{
-  outline: 2px solid var(--accent);
-  outline-offset: 6px;
+  outline:2px solid var(--accent);
+  outline-offset:6px;
 }
 
-@keyframes pulse {
+@keyframes pulse{
   0%,100%{ transform:scale(1); }
   50%{ transform:scale(1.05); }
 }
@@ -123,7 +123,16 @@ body{
 </div>
 
 <script>
-/* ─── SPEECH SYNTHESIS ─────────────────────────────────────── */
+const phraseEl = document.getElementById("phrase");
+const btn      = document.getElementById("btn");
+const statusEl = document.getElementById("status");
+
+let mediaRecorder  = null;
+let audioChunks    = [];
+let recording      = false;
+let stream         = null;
+
+/* ─── SPEECH SYNTHESIS (fallback for status messages) ─────── */
 
 let preferredVoice = null;
 
@@ -142,21 +151,35 @@ if (speechSynthesis.onvoiceschanged !== undefined) {
   speechSynthesis.onvoiceschanged = loadVoices;
 }
 
-function speak(text) {
+function speakSynthesis(text) {
   return new Promise((resolve) => {
     speechSynthesis.cancel();
-
-    // Safari needs a tiny delay after cancel
     setTimeout(() => {
-      const utter = new SpeechSynthesisUtterance(text);
-      utter.lang  = "en-US";
-      utter.rate  = 0.92;
-      utter.pitch = 1;
+      const utter   = new SpeechSynthesisUtterance(text);
+      utter.lang    = "en-US";
+      utter.rate    = 0.92;
+      utter.pitch   = 1;
       if (preferredVoice) utter.voice = preferredVoice;
-      utter.onend = () => resolve();
+      utter.onend   = () => resolve();
       utter.onerror = () => resolve();
       speechSynthesis.speak(utter);
     }, 120);
+  });
+}
+
+/* ─── AUDIO PLAYBACK (for OpenAI TTS reply) ───────────────── */
+
+function playBase64Audio(base64) {
+  return new Promise((resolve) => {
+    const audio = new Audio("data:audio/mp3;base64," + base64);
+    audio.onended  = () => resolve();
+    audio.onerror  = () => resolve();
+
+    // iOS Safari requires play() inside user gesture chain
+    const playPromise = audio.play();
+    if (playPromise !== undefined) {
+      playPromise.catch(() => resolve());
+    }
   });
 }
 
@@ -169,146 +192,137 @@ function showKaraoke(text) {
 
   lines.forEach((line, i) => {
     const span = document.createElement("span");
-    span.textContent = line;
+    span.textContent  = line;
     span.style.cssText = "display:block;opacity:0;transition:opacity 0.4s ease;";
     phraseEl.appendChild(span);
     setTimeout(() => { span.style.opacity = "1"; }, i * 600);
   });
 }
 
-/* ─── SPEECH RECOGNITION ───────────────────────────────────── */
-
-const phraseEl  = document.getElementById("phrase");
-const btn       = document.getElementById("btn");
-const statusEl  = document.getElementById("status");
-
-const SpeechRecognition =
-  window.SpeechRecognition || window.webkitSpeechRecognition;
-
-if (!SpeechRecognition) {
-  phraseEl.textContent = "Speech not supported";
-  statusEl.textContent = "UNSUPPORTED";
-  btn.disabled = true;
-  speak("Sorry, speech recognition is not supported in this browser.");
-  throw new Error("SpeechRecognition not supported");
-}
-
-const recognition       = new SpeechRecognition();
-recognition.lang        = "en-US";
-recognition.interimResults = true;
-recognition.continuous  = false;
-
-let finalTranscript = "";
-let listening       = false;
-let endFired        = false; // Safari onend double-fire guard
+/* ─── UI HELPERS ───────────────────────────────────────────── */
 
 function setStatus(text) {
   statusEl.textContent = text;
 }
 
-function setListening(active) {
-  listening = active;
+function setRecording(active) {
+  recording = active;
   btn.classList.toggle("active", active);
   btn.setAttribute("aria-label", active ? "Tap to stop" : "Tap to start speaking");
+  btn.textContent = active ? "STOP" : "SPEAK";
 }
 
-/* Live transcription */
-recognition.onresult = (e) => {
-  let interim = "";
-  for (let i = e.resultIndex; i < e.results.length; i++) {
-    const t = e.results[i][0].transcript;
-    if (e.results[i].isFinal) finalTranscript += t;
-    else interim += t;
-  }
-  phraseEl.className = "phrase";
-  phraseEl.textContent = finalTranscript + interim;
-};
+/* ─── MAIN PIPELINE ────────────────────────────────────────── */
 
-/* After speech ends */
-recognition.onend = async () => {
-  if (endFired) return;   // Safari double-fire guard
-  endFired = true;
-
-  if (!finalTranscript.trim()) {
-    setListening(false);
+async function startRecording() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    console.error(err);
     setStatus("IDLE");
+    phraseEl.className   = "phrase empty";
+    phraseEl.textContent = "MICROPHONE BLOCKED";
+    await speakSynthesis("Microphone access was denied. Please allow microphone and try again.");
     return;
   }
 
-  setListening(false);
+  audioChunks = [];
+
+  // Pick best supported mime type
+  const mimeType = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4",
+  ].find(m => MediaRecorder.isTypeSupported(m)) || "";
+
+  mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) audioChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = async () => {
+    // Stop all tracks to release mic indicator
+    stream.getTracks().forEach(t => t.stop());
+
+    const blob     = new Blob(audioChunks, { type: mimeType || "audio/webm" });
+    const fileExt  = mimeType.includes("mp4") ? "m4a" : "webm";
+
+    if (blob.size < 1000) {
+      setStatus("IDLE");
+      phraseEl.className   = "phrase empty";
+      phraseEl.textContent = "TRY AGAIN";
+      await speakSynthesis("I didn't catch that. Please try again.");
+      return;
+    }
+
+    setStatus("PROCESSING");
+    await speakSynthesis("Processing your answer.");
+
+    try {
+      const formData = new FormData();
+      formData.append("audio", blob, `recording.${fileExt}`);
+
+      const response = await fetch("/api/ai", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error("Server error");
+
+      const data  = await response.json();
+      const reply = data.reply || "Okay. Say it again.";
+
+      showKaraoke(reply);
+
+      if (data.audio) {
+        await playBase64Audio(data.audio);
+      } else {
+        await speakSynthesis(reply);
+      }
+
+    } catch (err) {
+      console.error(err);
+      phraseEl.className   = "phrase empty";
+      phraseEl.textContent = "TRY AGAIN";
+      await speakSynthesis("Something went wrong. Please try again.");
+    } finally {
+      setStatus("IDLE");
+    }
+  };
+
+  mediaRecorder.start();
+  setRecording(true);
+  setStatus("LISTENING");
+  await speakSynthesis("Listening.");
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+  setRecording(false);
   setStatus("PROCESSING");
-  await speak("Processing your answer.");
-
-  try {
-    const response = await fetch("/api/ai", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: finalTranscript })
-    });
-
-    if (!response.ok) throw new Error("Server error");
-
-    const data  = await response.json();
-    const reply = data.reply || "Okay. Say it again.";
-
-    showKaraoke(reply);
-    await speak(reply);
-
-  } catch (err) {
-    console.error(err);
-    phraseEl.className    = "phrase empty";
-    phraseEl.textContent  = "TRY AGAIN";
-    await speak("Something went wrong. Please try again.");
-  } finally {
-    finalTranscript = "";
-    setStatus("IDLE");
-  }
-};
-
-recognition.onerror = async (e) => {
-  console.error("Recognition error:", e.error);
-  setListening(false);
-  setStatus("IDLE");
-
-  if (e.error === "not-allowed") {
-    phraseEl.textContent = "MICROPHONE BLOCKED";
-    await speak("Microphone access was denied. Please allow microphone and try again.");
-  } else {
-    phraseEl.className   = "phrase empty";
-    phraseEl.textContent = "TRY AGAIN";
-    await speak("Something went wrong. Please try again.");
-  }
-  finalTranscript = "";
-};
+}
 
 /* ─── BUTTON ───────────────────────────────────────────────── */
 
 btn.addEventListener("click", async () => {
-  if (!listening) {
-    endFired        = false;
-    finalTranscript = "";
+  if (!recording) {
     phraseEl.textContent = "";
     phraseEl.className   = "phrase";
-    setListening(true);
-    setStatus("LISTENING");
-    await speak("Listening.");
-
-    try {
-      recognition.start();
-    } catch (err) {
-      console.error(err);
-    }
+    await startRecording();
   } else {
-    recognition.stop();
+    stopRecording();
   }
 });
 
 /* ─── PAGE LOAD ────────────────────────────────────────────── */
 
 window.addEventListener("load", () => {
-  // Delay slightly — Safari blocks synthesis before user gesture
   setTimeout(() => {
-    speak("Hello. Tap the button and start speaking.");
+    speakSynthesis("Hello. Tap the button and start speaking.");
   }, 800);
 });
 </script>
