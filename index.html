@@ -47,6 +47,7 @@ body{
   font-family:'DM Serif Display',serif;
   font-size:clamp(28px,6vw,46px);
   font-style:italic;
+  line-height:1.4;
 }
 
 .phrase.empty{
@@ -66,6 +67,11 @@ body{
   font-size:12px;
   letter-spacing:.22em;
   cursor:pointer;
+  transition: background 0.2s ease;
+}
+
+.btn.active{
+  background: var(--accent);
 }
 
 .status{
@@ -110,6 +116,28 @@ recognition.continuous = false;
 let finalTranscript = "";
 let listening = false;
 
+/* 🎬 KARAOKE */
+function showKaraoke(text) {
+  const lines = text.split("\n").filter(l => l.trim());
+  phraseEl.innerHTML = "";
+  phraseEl.className = "phrase";
+
+  lines.forEach((line, i) => {
+    const span = document.createElement("span");
+    span.textContent = line;
+    span.style.cssText = `
+      display: block;
+      opacity: 0;
+      transition: opacity 0.4s ease;
+    `;
+    phraseEl.appendChild(span);
+
+    setTimeout(() => {
+      span.style.opacity = "1";
+    }, i * 600);
+  });
+}
+
 /* 🎤 LIVE TRANSCRIPTION */
 recognition.onresult = (e) => {
   let interim = "";
@@ -131,6 +159,7 @@ recognition.onresult = (e) => {
 recognition.onend = async () => {
   if (!finalTranscript.trim()) {
     listening = false;
+    btn.classList.remove("active");
     statusEl.textContent = "IDLE";
     return;
   }
@@ -140,20 +169,14 @@ recognition.onend = async () => {
   try {
     const response = await fetch("/api/ai", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: finalTranscript })
     });
 
-    if (!response.ok) {
-      throw new Error("Server error");
-    }
+    if (!response.ok) throw new Error("Server error");
 
     const data = await response.json();
-
-    phraseEl.className = "phrase";
-    phraseEl.textContent = data.reply || "No response";
+    showKaraoke(data.reply || "Okay. Say it again.");
 
   } catch (err) {
     console.error(err);
@@ -162,8 +185,19 @@ recognition.onend = async () => {
   } finally {
     finalTranscript = "";
     listening = false;
+    btn.classList.remove("active");
     statusEl.textContent = "IDLE";
   }
+};
+
+/* 🔴 ERROR HANDLING */
+recognition.onerror = (e) => {
+  console.error("Recognition error:", e.error);
+  phraseEl.className = "phrase empty";
+  phraseEl.textContent = "TRY AGAIN";
+  listening = false;
+  btn.classList.remove("active");
+  statusEl.textContent = "IDLE";
 };
 
 /* 🔘 TAP TO TOGGLE */
@@ -173,6 +207,7 @@ btn.addEventListener("click", () => {
     finalTranscript = "";
     phraseEl.textContent = "";
     phraseEl.className = "phrase";
+    btn.classList.add("active");
     statusEl.textContent = "LISTENING";
 
     try {
