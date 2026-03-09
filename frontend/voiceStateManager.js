@@ -20,9 +20,11 @@ function init({ statusElementId, onChange } = {}) {
   if (statusElementId) {
     statusElement = document.getElementById(statusElementId);
   }
+
   if (typeof onChange === 'function') {
     onChangeCallback = onChange;
   }
+
   _applyState(VOICE_STATES.IDLE);
 }
 
@@ -31,7 +33,9 @@ function setState(newState) {
     console.warn(`[voiceState] Unknown state: "${newState}"`);
     return;
   }
+
   if (newState === currentState) return;
+
   currentState = newState;
   _applyState(newState);
 }
@@ -46,6 +50,7 @@ function is(state) {
 
 function _applyState(state) {
   _updateStatusText(state);
+
   if (typeof onChangeCallback === 'function') {
     onChangeCallback(state);
   }
@@ -53,11 +58,12 @@ function _applyState(state) {
 
 function _updateStatusText(state) {
   if (!statusElement) return;
+
   statusElement.textContent = STATUS_TEXT[state] ?? '';
   statusElement.dataset.voiceState = state.toLowerCase();
 }
 
-export {
+window.voiceStateManager = {
   VOICE_STATES,
   STATUS_TEXT,
   init,
