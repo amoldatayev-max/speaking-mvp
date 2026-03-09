@@ -42,31 +42,39 @@ One line at a time.
 Keep responses as short as possible.
 `.trim();
 
+/* ─── API HANDLER ─────────────────────────────────────────── */
+
 export default async function handler(req, res) {
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  /* ─── PARSE FORM DATA ──────────────────────────────────────── */
-
   const form = formidable({ keepExtensions: true });
 
   let audioPath;
+
   try {
     const [, files] = await form.parse(req);
     const file = files.audio?.[0] ?? files.audio;
-    if (!file) throw new Error("No audio file received");
+
+    if (!file) {
+      throw new Error("No audio file received");
+    }
+
     audioPath = file.filepath;
+
   } catch (err) {
     console.error("Form parse error:", err);
     return res.status(400).json({ error: "Invalid audio upload" });
   }
 
   try {
-    /* ─── 1. TRANSCRIBE ──────────────────────────────────────── */
+
+    /* ─── 1. TRANSCRIBE ───────────────────────────────────── */
 
     const transcription = await openai.audio.transcriptions.create({
-      file:  fs.createReadStream(audioPath),
+      file: fs.createReadStream(audioPath),
       model: "whisper-1",
       language: "en",
     });
@@ -74,21 +82,23 @@ export default async function handler(req, res) {
     const userText = transcription.text?.trim();
 
     if (!userText) {
+      const fallback = "I didn't catch that. Please try again.";
+
       return res.status(200).json({
-        reply: "I didn't catch that. Please try again.",
-        audio: await generateTTS("I didn't catch that. Please try again."),
+        reply: fallback,
+        audio: await generateTTS(fallback),
       });
     }
 
-    /* ─── 2. AI REPLY ────────────────────────────────────────── */
+    /* ─── 2. AI RESPONSE ─────────────────────────────────── */
 
     const completion = await openai.chat.completions.create({
-      model:       "gpt-4o-mini",
+      model: "gpt-4o-mini",
       temperature: 0.3,
-      max_tokens:  180,
+      max_tokens: 180,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user",   content: userText },
+        { role: "user", content: userText },
       ],
     });
 
@@ -96,25 +106,34 @@ export default async function handler(req, res) {
       completion.choices?.[0]?.message?.content?.trim() ||
       "Okay. Say it again.";
 
-    /* ─── 3. TTS ─────────────────────────────────────────────── */
+    /* ─── 3. TEXT TO SPEECH ───────────────────────────────── */
 
     const audioBase64 = await generateTTS(reply);
 
-    return res.status(200).json({ reply, audio: audioBase64 });
+    return res.status(200).json({
+      reply,
+      audio: audioBase64,
+    });
 
   } catch (err) {
     console.error("Pipeline error:", err);
     return res.status(500).json({ error: "Pipeline error" });
+
   } finally {
-    // Clean up temp file
-    if (audioPath) fs.unlink(audioPath, () => {});
+
+    if (audioPath) {
+      fs.unlink(audioPath, () => {});
+    }
+
   }
 }
 
 /* ─── TTS HELPER ───────────────────────────────────────────── */
 
 async function generateTTS(text) {
+
   try {
+
     const response = await openai.audio.speech.create({
       model: "tts-1",
       voice: "nova",
@@ -124,8 +143,12 @@ async function generateTTS(text) {
 
     const buffer = Buffer.from(await response.arrayBuffer());
     return buffer.toString("base64");
+
   } catch (err) {
+
     console.error("TTS error:", err);
     return null;
+
   }
+
 }
